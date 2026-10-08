@@ -1,10 +1,11 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { StatusBadge } from "@/components/StatusBadge";
 import { brl, dateBR, errMsg } from "@/lib/format";
 
@@ -20,17 +21,28 @@ export const Route = createFileRoute("/_authenticated/pedido/$id")({
   component: OrderPage,
 });
 
+function maskCpf(v: string) {
+  const d = v.replace(/\D/g, "").slice(0, 11);
+  return d
+    .replace(/^(\d{3})(\d)/, "$1.$2")
+    .replace(/^(\d{3})\.(\d{3})(\d)/, "$1.$2.$3")
+    .replace(/\.(\d{3})(\d)/, ".$1-$2");
+}
+
 function OrderPage() {
   const { id } = Route.useParams();
-  const qc = useQueryClient();
-  const [uploading, setUploading] = useState(false);
+  const [cpf, setCpf] = useState("");
+  const [paying, setPaying] = useState(false);
 
   const { data, isLoading } = useQuery({
     queryKey: ["order", id],
+    // enquanto aguarda pagamento, confere o status a cada 5 segundos
+    refetchInterval: (q) =>
+      q.state.data?.o?.status === "aguardando_pagamento" ? 5000 : false,
     queryFn: async () => {
       const { data: o, error } = await supabase
         .from("orders")
-        .select("*, events(name, event_date, event_time, location), ticket_types(name, payment_link)")
+        .select("*, events(name, event_date, event_time, location), ticket_types(name)")
         .eq("id", id)
         .maybeSingle();
       if (error) throw error;
@@ -47,21 +59,36 @@ function OrderPage() {
   if (!data?.o) return <p className="p-6">Pedido não encontrado.</p>;
   const { o, tickets, profile, settings } = data;
 
-  const upload = async (file: File) => {
-    setUploading(true);
+  const pay = async () => {
+    const digits = cpf.replace(/\D/g, "");
+    if (digits.length !== 11) {
+      toast.error("Informe um CPF válido");
+      return;
+    }
+    setPaying(true);
+    // abre a aba já no clique, senão o navegador bloqueia o pop-up
+    const win = window.open("about:blank", "_blank");
     try {
-      const { data: u } = await supabase.auth.getUser();
-      const path = `${u.user!.id}/${o.id}-${Date.now()}.${file.name.split(".").pop()}`;
-      const { error } = await supabase.storage.from("receipts").upload(path, file);
-      if (error) throw error;
-      const { error: e2 } = await supabase.rpc("set_order_receipt", { _order_id: o.id, _path: path });
-      if (e2) throw e2;
-      toast.success("Comprovante enviado!");
-      qc.invalidateQueries({ queryKey: ["order", id] });
+      const { data: s } = await supabase.auth.getSession();
+      const token = s.session?.access_token;
+      if (!token) throw new Error("Sessão expirada. Entre novamente.");
+      const r = await fetch("/api/asaas/criar-pix", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ orderId: o.id, cpf: digits }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.invoiceUrl) throw new Error(j.error ?? "Não foi possível gerar o pagamento");
+      if (win) win.location.href = j.invoiceUrl;
+      else window.location.href = j.invoiceUrl;
     } catch (e) {
+      win?.close();
       toast.error(errMsg(e));
     } finally {
-      setUploading(false);
+      setPaying(false);
     }
   };
 
@@ -82,26 +109,26 @@ function OrderPage() {
 
       {o.status === "aguardando_pagamento" && (
         <div className="mt-6 space-y-4">
-          {o.ticket_types?.payment_link && (
-            <Button asChild variant="sunset" className="h-14 w-full text-lg">
-              <a href={o.ticket_types.payment_link} target="_blank" rel="noopener noreferrer">Pagar agora</a>
-            </Button>
-          )}
-          {settings?.payment_message && <p className="text-sm text-muted-foreground">{settings.payment_message}</p>}
-          <p className="rounded-md border border-warning/40 bg-warning/10 p-3 text-sm">
-            Depois de pagar, aguarde a confirmação. Seu nome entra na lista assim que a BECO42 confirmar.
-          </p>
-          <label className="block rounded-md border border-dashed border-border p-4 text-center text-sm">
-            {o.receipt_path ? "✓ Comprovante enviado — enviar outro" : "Enviar comprovante (opcional)"}
-            <input
-              type="file"
-              accept="image/*,application/pdf"
-              className="hidden"
-              disabled={uploading}
-              onChange={(e) => e.target.files?.[0] && upload(e.target.files[0])}
+          <div className="space-y-2">
+            <label className="text-sm" htmlFor="cpf">CPF do comprador</label>
+            <Input
+              id="cpf"
+              inputMode="numeric"
+              placeholder="000.000.000-00"
+              value={cpf}
+              onChange={(e) => setCpf(maskCpf(e.target.value))}
             />
-            {uploading && <span className="mt-1 block text-muted-foreground">Enviando…</span>}
-          </label>
+          </div>
+          <Button variant="sunset" className="h-14 w-full text-lg" disabled={paying} onClick={pay}>
+            {paying ? "Abrindo pagamento…" : "Pagar agora"}
+          </Button>
+          <p className="text-center text-xs text-muted-foreground">
+            Pix, cartão de crédito ou débito. A confirmação é automática.
+          </p>
+          <p className="rounded-md border border-warning/40 bg-warning/10 p-3 text-sm">
+            Depois de pagar, volte para esta tela. Ela atualiza sozinha e seu ingresso aparece
+            assim que o pagamento for confirmado.
+          </p>
           {settings?.support_whatsapp && (
             <a
               className="block text-center text-xs text-muted-foreground underline"
