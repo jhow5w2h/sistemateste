@@ -72,12 +72,7 @@ function EventPage() {
       await supabase.from("profiles").update({ whatsapp: whats.trim(), email: profile.email || user.email || null }).eq("id", user.id);
       refetchProfile();
     }
-    if (!tt.payment_link) {
-      toast.error("Link de pagamento ainda não cadastrado para esse ingresso.");
-      return;
-    }
     setBusy(true);
-    const win = window.open("about:blank", "_blank");
     const { data: orderId, error } = await supabase.rpc("create_order", {
       _ticket_type_id: tt.id,
       _quantity: qty,
@@ -91,11 +86,10 @@ function EventPage() {
     }
     setBusy(false);
     if (error) {
-      win?.close();
       toast.error(errMsg(error));
       return;
     }
-    if (win) win.location.href = tt.payment_link;
+    // o pagamento (Pix, crédito ou débito) acontece na tela do pedido
     navigate({ to: "/pedido/$id", params: { id: orderId as string } });
   };
 
