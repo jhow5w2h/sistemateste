@@ -43,7 +43,7 @@ export const Route = createFileRoute("/api/asaas/criar-pix")({
           const cpfNum = String(cpf ?? "").replace(/\D/g, "");
           if (cpfNum.length !== 11) return json({ error: "CPF inválido" }, 400);
 
-          // 3. pedido (valor vem do banco, nunca do navegador)
+          // 3. pedido (o valor vem do banco, nunca do navegador)
           const { data: order } = await admin
             .from("orders")
             .select("id,user_id,total,status,payment_reference")
@@ -75,17 +75,19 @@ export const Route = createFileRoute("/api/asaas/criar-pix")({
             const due = new Date(Date.now() + 24 * 3600 * 1000)
               .toISOString()
               .slice(0, 10);
+
             const payment = await asaas("/payments", {
               method: "POST",
               body: JSON.stringify({
                 customer: customer.id,
-                billingType: "PIX",
+                billingType: "UNDEFINED", // cliente escolhe: Pix, crédito, débito ou boleto
                 value: Number(order.total),
                 dueDate: due,
                 externalReference: order.id,
                 description: "Ingresso ÁREA 42",
               }),
             });
+
             paymentId = payment.id;
             await admin
               .from("orders")
@@ -93,14 +95,9 @@ export const Route = createFileRoute("/api/asaas/criar-pix")({
               .eq("id", order.id);
           }
 
-          // 5. QR Code
-          const qr = await asaas(`/payments/${paymentId}/pixQrCode`);
-          return json({
-            paymentId,
-            qrImage: qr.encodedImage, // base64 (PNG)
-            copiaECola: qr.payload,
-            expiresAt: qr.expirationDate,
-          });
+          // 5. link da página de pagamento do Asaas
+          const pay = await asaas(`/payments/${paymentId}`);
+          return json({ paymentId, invoiceUrl: pay.invoiceUrl });
         } catch (e) {
           console.error("criar-pix", e);
           return json({ error: e instanceof Error ? e.message : "Erro" }, 500);
